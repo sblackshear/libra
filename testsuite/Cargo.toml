@@ -17,7 +17,7 @@ anyhow = "1.0.32"
 hex = "0.4.2"
 num = "0.3.0"
 num-traits = "0.2.12"
-rust_decimal = "1.7.0"
+rust_decimal = "1.8.1"
 statistical = "1.0.0"
 
 cli = { path = "cli", version = "0.1.0", features = ["fuzzing"]  }
