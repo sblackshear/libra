@@ -12,7 +12,7 @@ use vm::{
 };
 
 /// LocalState represents the current assignment state of a local
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum LocalState {
     /// The local does not have a value
     Unavailable,
@@ -25,7 +25,7 @@ pub(crate) enum LocalState {
 use crate::binary_views::{BinaryIndexedView, FunctionView};
 use LocalState::*;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct AbstractState {
     current_function: Option<FunctionDefinitionIndex>,
     local_kinds: Vec<Kind>,

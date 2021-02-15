@@ -5,16 +5,116 @@ use crate::{
     binary_views::FunctionView,
     control_flow_graph::{BlockId, ControlFlowGraph},
 };
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fmt::Debug,
+    ops::{Deref, DerefMut},
+};
 use vm::file_format::{Bytecode, CodeOffset};
 
 /// Trait for finite-height abstract domains. Infinite height domains would require a more complex
 /// trait with widening and a partial order.
-pub(crate) trait AbstractDomain: Clone + Sized {
+pub trait AbstractDomain: Clone + Sized + Eq + PartialOrd + PartialEq + Debug {
     fn join(&mut self, other: &Self) -> JoinResult;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SetDomain<Elem: Clone + Ord + Sized>(pub BTreeSet<Elem>);
+
+impl<E: Clone + Ord + Sized> Default for SetDomain<E> {
+    fn default() -> Self {
+        Self(BTreeSet::new())
+    }
+}
+
+impl<E: Clone + Ord + Sized> Deref for SetDomain<E> {
+    type Target = BTreeSet<E>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<E: Clone + Ord + Sized> DerefMut for SetDomain<E> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<E: Clone + Ord + Sized + Debug> AbstractDomain for SetDomain<E> {
+    fn join(&mut self, other: &Self) -> JoinResult {
+        if self == other {
+            JoinResult::Unchanged
+        } else {
+            for e in other.iter() {
+                self.insert(e.clone());
+            }
+            JoinResult::Changed
+        }
+    }
+}
+
+impl<E: Clone + Ord + Sized> SetDomain<E> {
+    pub fn singleton(e: E) -> Self {
+        let mut s = SetDomain::default();
+        s.insert(e);
+        s
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct MapDomain<K: Ord, V: AbstractDomain>(pub BTreeMap<K, V>);
+
+impl<K: Ord, V: AbstractDomain> MapDomain<K, V> {
+    /// join `v` with self[k] if `k` is bound, insert `v` otherwise
+    pub fn insert_join(&mut self, k: K, v: V) {
+        self.0
+            .entry(k)
+            .and_modify(|old_v| {
+                old_v.join(&v);
+            })
+            .or_insert(v);
+    }
+}
+
+impl<K: Ord, V: AbstractDomain> Default for MapDomain<K, V> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+impl<K: Clone + Sized + Eq + Ord + Debug, V: AbstractDomain> AbstractDomain for MapDomain<K, V> {
+    fn join(&mut self, other: &Self) -> JoinResult {
+        if self == other {
+            JoinResult::Unchanged
+        } else {
+            for (k, v1) in other.iter() {
+                self.entry(k.clone())
+                    .and_modify(|v2| {
+                        v2.join(&v1);
+                    })
+                    .or_insert_with(|| v1.clone());
+            }
+            JoinResult::Changed
+        }
+    }
+}
+
+impl<K: Clone + Sized + Eq + Ord, V: AbstractDomain> Deref for MapDomain<K, V> {
+    type Target = BTreeMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<K: Clone + Sized + Eq + Ord, V: AbstractDomain> DerefMut for MapDomain<K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum JoinResult {
     Changed,
     Unchanged,

@@ -7,29 +7,152 @@
 //! - accesses to mutable references are safe
 //! - accesses to global storage references are safe
 
-mod abstract_state;
-mod simple_borrow;
-
 use crate::{
-    absint::{AbstractInterpreter, BlockInvariant, BlockPostcondition, TransferFunctions},
+    absint::{
+        AbstractDomain, AbstractInterpreter, JoinResult, MapDomain, SetDomain, TransferFunctions,
+    },
     binary_views::{BinaryIndexedView, FunctionView},
 };
-use abstract_state::{AbstractState, AbstractValue};
+
 use mirai_annotations::*;
-use std::collections::{BTreeSet, HashMap};
+use std::{collections::HashMap, fmt::Debug};
 use vm::{
     errors::{PartialVMError, PartialVMResult},
     file_format::{
-        Bytecode, CodeOffset, FunctionDefinitionIndex, FunctionHandle, IdentifierIndex,
-        SignatureToken, StructDefinition, StructFieldInformation,
+        Bytecode, CodeOffset, FieldHandleIndex, FunctionDefinitionIndex, IdentifierIndex,
+        LocalIndex, SignatureToken, StructDefinition, StructDefinitionIndex,
+        StructFieldInformation,
     },
 };
+
+// ========= domains
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+enum RefQualifier {
+    Mut,
+    Immut,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+struct AbstractPath {
+    paths: SetDomain<Path>,
+    qualifier: RefQualifier,
+}
+
+/// Offset of an access path: either a field, vector index, or global key
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Offset {
+    /// Index into contents of a struct by field offset
+    Field(FieldHandleIndex),
+    /// Unknown index into a vector
+    VectorIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Path {
+    root: Root,
+    offsets: Vec<Offset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Root {
+    Local(LocalIndex),
+    Global(StructDefinitionIndex),
+}
+
+type AbstractState = MapDomain<LocalIndex, AbstractPath>;
+
+// ========= joins
+
+impl AbstractDomain for RefQualifier {
+    fn join(&mut self, q: &RefQualifier) -> JoinResult {
+        match self {
+            RefQualifier::Mut => JoinResult::Unchanged,
+            RefQualifier::Immut => {
+                if *q == RefQualifier::Immut {
+                    JoinResult::Unchanged
+                } else {
+                    *self = RefQualifier::Mut;
+                    JoinResult::Changed
+                }
+            }
+        }
+    }
+}
+
+impl AbstractDomain for AbstractPath {
+    fn join(&mut self, a: &AbstractPath) -> JoinResult {
+        if self.paths.join(&a.paths) == JoinResult::Changed
+            || self.qualifier.join(&a.qualifier) == JoinResult::Changed
+        {
+            JoinResult::Changed
+        } else {
+            JoinResult::Unchanged
+        }
+    }
+}
+
+// ========= impls
+
+impl Path {
+    /// Return true if `self` is a prefix of `p` (proper or improper)
+    pub fn is_prefix(&self, p: &Path) -> bool {
+        if self.root != p.root || self.offsets.len() > p.offsets.len() {
+            return false;
+        }
+        for (i, offset) in self.offsets.iter().enumerate() {
+            if p.offsets[i] != *offset {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Path {
+    pub fn add_offset(&mut self, offset: Offset) {
+        self.offsets.push(offset)
+    }
+}
+
+impl AbstractPath {
+    pub fn non_ref() -> Self {
+        AbstractPath {
+            paths: SetDomain::default(),
+            qualifier: RefQualifier::Immut,
+        }
+    }
+
+    /// Return true if `self` contains a path `p <= p_in`
+    pub fn contains_path_prefix(&self, p_in: &Path) -> bool {
+        self.paths.iter().any(|p| p.is_prefix(p_in))
+    }
+
+    /// Return true if `self` contains any path `p` that is a prefix of some path in other
+    pub fn contains_prefix(&self, other: &AbstractPath) -> bool {
+        self.paths
+            .iter()
+            .any(|p| other.paths.iter().any(|other_p| p.is_prefix(other_p)))
+    }
+
+    pub fn add_offset(&mut self, offset: Offset) {
+        let mut acc = SetDomain::default();
+        for p in self.paths.iter() {
+            let new_p = p.clone();
+            new_p.add_offset(offset);
+            acc.insert(new_p);
+        }
+        self.paths = acc
+    }
+}
+
+// ========= analysis
 
 struct ReferenceSafetyAnalysis<'a> {
     resolver: &'a BinaryIndexedView<'a>,
     function_view: &'a FunctionView<'a>,
     name_def_map: &'a HashMap<IdentifierIndex, FunctionDefinitionIndex>,
-    stack: Vec<AbstractValue>,
+    stack: Vec<AbstractPath>,
 }
 
 impl<'a> ReferenceSafetyAnalysis<'a> {
@@ -52,22 +175,22 @@ pub(crate) fn verify<'a>(
     function_view: &FunctionView,
     name_def_map: &'a HashMap<IdentifierIndex, FunctionDefinitionIndex>,
 ) -> PartialVMResult<()> {
-    let initial_state = AbstractState::new(function_view);
+    let initial_state = AbstractState::default();
 
     let mut verifier = ReferenceSafetyAnalysis::new(resolver, function_view, name_def_map);
     let inv_map = verifier.analyze_function(initial_state, function_view);
-    // Report all the join failures
+    /*// Report all the join failures
     for (_block_id, BlockInvariant { post, .. }) in inv_map {
         match post {
             BlockPostcondition::Error(err) => return Err(err),
             // Block might be unprocessed if all predecessors had an error
             BlockPostcondition::Unprocessed | BlockPostcondition::Success => (),
         }
-    }
+    }*/
     Ok(())
 }
 
-fn call(
+/*fn call(
     verifier: &mut ReferenceSafetyAnalysis,
     state: &mut AbstractState,
     offset: CodeOffset,
@@ -99,7 +222,7 @@ fn call(
         verifier.stack.push(value)
     }
     Ok(())
-}
+}*/
 
 fn num_fields(struct_def: &StructDefinition) -> usize {
     match &struct_def.field_information {
@@ -108,19 +231,17 @@ fn num_fields(struct_def: &StructDefinition) -> usize {
     }
 }
 
-fn pack(verifier: &mut ReferenceSafetyAnalysis, struct_def: &StructDefinition) {
-    for _ in 0..num_fields(struct_def) {
-        checked_verify!(verifier.stack.pop().unwrap().is_value())
+/// Error if state or stack contain a path p such that path <= p
+fn check_prefix(path: &AbstractPath, state: &AbstractState, stack: &Vec<AbstractState>) {
+    for p in state.values() {
+        if p.contains_prefix(p) {
+            unimplemented!("raise error here")
+        }
     }
-    // TODO maybe call state.value_for
-    verifier.stack.push(AbstractValue::NonReference)
-}
-
-fn unpack(verifier: &mut ReferenceSafetyAnalysis, struct_def: &StructDefinition) {
-    checked_verify!(verifier.stack.pop().unwrap().is_value());
-    // TODO maybe call state.value_for
-    for _ in 0..num_fields(struct_def) {
-        verifier.stack.push(AbstractValue::NonReference)
+    for p in stack.iter() {
+        if p.contains_prefix(p) {
+            unimplemented!("raise error here")
+        }
     }
 }
 
@@ -131,17 +252,18 @@ fn execute_inner(
     offset: CodeOffset,
 ) -> PartialVMResult<()> {
     match bytecode {
-        Bytecode::Pop => state.release_value(verifier.stack.pop().unwrap()),
+        Bytecode::Pop => verifier.stack.pop(),
 
-        Bytecode::CopyLoc(local) => {
-            let value = state.copy_loc(offset, *local)?;
-            verifier.stack.push(value)
-        }
+        Bytecode::CopyLoc(local) => verifier.stack.push(state.get(local)),
         Bytecode::MoveLoc(local) => {
-            let value = state.move_loc(offset, *local)?;
-            verifier.stack.push(value)
+            let v = state.remove(local).unwrap();
+            check_prefix(v, state, &verifier.stack);
+
+            verifier.stack.push(v)
         }
-        Bytecode::StLoc(local) => state.st_loc(offset, *local, verifier.stack.pop().unwrap())?,
+        Bytecode::StLoc(local) => {
+            let v = verifier.stack.pop();
+        }
 
         Bytecode::FreezeRef => {
             let id = verifier.stack.pop().unwrap().ref_id().unwrap();
@@ -237,12 +359,12 @@ fn execute_inner(
 
         Bytecode::Call(idx) => {
             let function_handle = verifier.resolver.function_handle_at(*idx);
-            call(verifier, state, offset, function_handle)?
+            //call(verifier, state, offset, function_handle)?
         }
         Bytecode::CallGeneric(idx) => {
             let func_inst = verifier.resolver.function_instantiation_at(*idx);
             let function_handle = verifier.resolver.function_handle_at(func_inst.handle);
-            call(verifier, state, offset, function_handle)?
+            //call(verifier, state, offset, function_handle)?
         }
 
         Bytecode::Ret => {
@@ -304,26 +426,26 @@ fn execute_inner(
             checked_verify!(verifier.stack.pop().unwrap().is_value());
             checked_verify!(verifier.stack.pop().unwrap().is_value());
             // TODO maybe call state.value_for
-            verifier.stack.push(AbstractValue::NonReference)
+            //            verifier.stack.push(AbstractValue::NonReference)
         }
 
         Bytecode::Pack(idx) => {
             let struct_def = verifier.resolver.struct_def_at(*idx)?;
-            pack(verifier, struct_def)
+            //          pack(verifier, struct_def)
         }
         Bytecode::PackGeneric(idx) => {
             let struct_inst = verifier.resolver.struct_instantiation_at(*idx)?;
             let struct_def = verifier.resolver.struct_def_at(struct_inst.def)?;
-            pack(verifier, struct_def)
+            //        pack(verifier, struct_def)
         }
         Bytecode::Unpack(idx) => {
             let struct_def = verifier.resolver.struct_def_at(*idx)?;
-            unpack(verifier, struct_def)
+            //      unpack(verifier, struct_def)
         }
         Bytecode::UnpackGeneric(idx) => {
             let struct_inst = verifier.resolver.struct_instantiation_at(*idx)?;
             let struct_def = verifier.resolver.struct_def_at(struct_inst.def)?;
-            unpack(verifier, struct_def)
+            //    unpack(verifier, struct_def)
         }
     };
     Ok(())
