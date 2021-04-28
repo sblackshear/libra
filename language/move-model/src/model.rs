@@ -2780,6 +2780,16 @@ impl<'env> FunctionEnv<'env> {
         idx < self.get_parameter_count()
     }
 
+    /// Returns the parameter types associated with this function
+    pub fn get_parameter_types(&self) -> Vec<Type> {
+        self.definition_view()
+            .arg_tokens()
+            .map(|tv: SignatureTokenView<CompiledModule>| {
+                self.module_env.globalize_signature(tv.signature_token())
+            })
+            .collect()
+    }
+
     /// Returns the regular parameters associated with this function.
     pub fn get_parameters(&self) -> Vec<Parameter> {
         let view = self.definition_view();

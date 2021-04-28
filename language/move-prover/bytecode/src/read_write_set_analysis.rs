@@ -247,7 +247,7 @@ impl ReadWriteSetState {
         let borrowed = self
             .locals
             .get_local(base, fun_env)
-            .expect("Unbound local")
+            .unwrap_or_else(|| panic!("Unbound local {:?}", base))
             .clone();
         let extended_aps = borrowed.add_offset(offset);
         for ap in extended_aps.footprint_paths() {
@@ -260,7 +260,7 @@ impl ReadWriteSetState {
         self.locals.bind_local(ret, extended_aps, fun_env)
     }
 
-    /// Write rh
+    /// Write `rhs` to `lhs_ref`
     pub fn write_ref(&mut self, lhs_ref: TempIndex, rhs: TempIndex, fun_env: &FunctionEnv) {
         if let Some(rhs_val) = self.locals.get_local(rhs, fun_env).cloned() {
             let lhs_paths = self
@@ -445,12 +445,49 @@ impl<'a> TransferFunctions for ReadWriteSetAnalysis<'a> {
                         state.record_access(args[1], Access::Read, func_env)
                     }
                 }
-                Pack(_mid, _sid, _types) => {
+                Pack(_mid, sid, _types) => {
                     // rets[0] = Pack<mid::sid<types>>(args)
+                    for (arg_index, fld) in func_env
+                        .module_env
+                        .get_struct(*sid)
+                        .get_fields()
+                        .enumerate()
+                    {
+                        let ty = fld.get_type();
+                        if ty.is_address() || ty.is_struct() {
+                            if let Some(rhs) =
+                                state.locals.get_local(args[arg_index], func_env).cloned()
+                            {
+                                // rets[0]/f = args[arg_index]
+                                let mut ap = AccessPath::from_index(rets[0], func_env);
+                                ap.add_offset(Offset::field(fld.get_offset()));
+                                state.locals.update_access_path(ap, Some(rhs));
+                            }
+                        }
+                    }
                 }
-                Unpack(..) => {
+                Unpack(_mid, sid, _types) => {
                     // rets = Unpack<mid::sid<types>>(args[0])
-                    // pack and unpack touch non-reference values; nothing to do
+                    if state.locals.local_exists(args[0], func_env) {
+                        for (ret_index, fld) in func_env
+                            .module_env
+                            .get_struct(*sid)
+                            .get_fields()
+                            .enumerate()
+                        {
+                            let ty = fld.get_type();
+                            if ty.is_address() || ty.is_struct() {
+                                state.assign_offset(
+                                    rets[ret_index],
+                                    args[0],
+                                    Offset::field(fld.get_offset()),
+                                    // TODO: add Some(Read) here?
+                                    None,
+                                    func_env,
+                                );
+                            }
+                        }
+                    }
                 }
                 CastU8 | CastU64 | CastU128 | Not | Add | Sub | Mul | Div | Mod | BitOr
                 | BitAnd | Xor | Shl | Shr | Lt | Gt | Le | Ge | Or | And => {
@@ -562,8 +599,13 @@ fn call_native_function(
         ("Event", "write_to_event_store") => (),
         ("Hash", "sha3_256") | ("Hash", "sha2_256") => (),
         ("Signature", "ed25519_validate_pubkey") | ("Signature", "ed25519_verify") => (),
+        ("Token", "name_of") | ("BCS", "to_address") => state.locals.bind_local(
+            rets[0],
+            AbsAddr::constant(num::BigUint::from_bytes_le(&vec![0xa])),
+            func_env,
+        ),
         (m, f) => {
-            unimplemented!("Unsupported native function {:?}::{:?}", m, f)
+            println!("Warning: Unsupported native function {:?}::{:?}", m, f)
         }
     }
 }

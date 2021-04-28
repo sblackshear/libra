@@ -77,7 +77,7 @@ impl OnDiskStateView {
     }
 
     fn is_data_path(&self, p: &Path, parent_dir: &str) -> bool {
-        if !p.exists() {
+        if !p.exists() || !p.is_file() {
             return false;
         }
         let p = p.canonicalize().unwrap();

@@ -156,6 +156,11 @@ impl Type {
         }
     }
 
+    /// Returns true if this is an account address
+    pub fn is_address(&self) -> bool {
+        matches!(self, Type::Primitive(PrimitiveType::Address))
+    }
+
     /// Returns true if this is any number type.
     pub fn is_number(&self) -> bool {
         if let Type::Primitive(p) = self {

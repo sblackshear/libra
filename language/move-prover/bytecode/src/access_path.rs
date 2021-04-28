@@ -229,8 +229,11 @@ impl AbsAddr {
                     extended_ap.add_offset(offset.clone());
                     extended_aps.insert(Addr::Footprint(extended_ap));
                 }
-                Addr::Constant(_) => {
-                    panic!("Type error: address constant as base")
+                Addr::Constant(c) => {
+                    panic!(
+                        "Type error: address constant {:?} as base for offset {:?}",
+                        c, offset
+                    )
                 }
             }
         }
@@ -419,8 +422,12 @@ impl Offset {
                 s.get_type()
             }
             _ => panic!(
-                "Invalid base type {:?} for offset {:?} in get_type",
-                base, self
+                "Invalid base type {} for offset {:?} in get_type",
+                base.display(&move_model::ty::TypeDisplayContext::WithEnv {
+                    env,
+                    type_param_names: None
+                }),
+                self,
             ),
         }
     }
@@ -546,7 +553,7 @@ impl AccessPath {
                                     struct_type.clone(),
                                 ));
                                 let mut new_offsets = vec![];
-                                for v in self.offsets.iter().skip(0) {
+                                for v in self.offsets[1..].iter() {
                                     new_offsets.push(v.clone())
                                 }
                                 acc.insert(Addr::footprint(AccessPath::new(root, new_offsets)));
@@ -572,17 +579,18 @@ impl AccessPath {
         sub_map: &dyn AccessPathMap<AbsAddr>,
     ) -> AbsAddr {
         let mut acc = AbsAddr::default();
+        let mut new_offsets = self.offsets.clone();
+        new_offsets.iter_mut().for_each(|o| {
+            o.substitute_footprint(type_actuals);
+        });
         match &self.root {
             Root::Formal(i) => {
-                acc.join(&self.prepend_addrs(&actuals[*i]));
+                let new_ap = AccessPath::new(self.root.clone(), new_offsets);
+                acc.join(&new_ap.prepend_addrs(&actuals[*i]));
             }
             Root::Global(g) => {
                 let mut new_g = g.clone();
                 new_g.substitute_footprint(actuals, type_actuals, sub_map);
-                let mut new_offsets = self.offsets.clone();
-                new_offsets.iter_mut().for_each(|o| {
-                    o.substitute_footprint(type_actuals);
-                });
                 acc.insert(Addr::footprint(AccessPath::new(
                     Root::Global(new_g),
                     new_offsets,

@@ -6,6 +6,7 @@ use move_binary_format::file_format::CompiledModule;
 use move_core_types::{identifier::Identifier, language_storage::ModuleId};
 use move_model::model::{FunctionEnv, GlobalEnv};
 use prover_bytecode::{
+    escape_analysis::EscapeAnalysisProcessor,
     function_target_pipeline::{FunctionTargetPipeline, FunctionTargetsHolder, FunctionVariant},
     read_write_set_analysis::{ReadWriteSetProcessor, ReadWriteSetState},
 };
@@ -23,6 +24,7 @@ pub struct ReadWriteSet {
 pub fn analyze<'a>(modules: impl IntoIterator<Item = &'a CompiledModule>) -> Result<ReadWriteSet> {
     let env = move_model::run_bytecode_model_builder(modules)?;
     let mut pipeline = FunctionTargetPipeline::default();
+    pipeline.add_processor(EscapeAnalysisProcessor::new());
     pipeline.add_processor(ReadWriteSetProcessor::new());
     let mut targets = FunctionTargetsHolder::default();
     for module_env in env.get_modules() {
